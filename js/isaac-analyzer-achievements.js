@@ -15,12 +15,12 @@ class IsaacAchievementParser {
         };
         this.loadedTabs = new Set(); // Кэш загруженных вкладок
         this.isGeneratingImage = false; // Флаг генерации изображения
+        this.activeFilters = {}; // Сохраняем активные фильтры для каждой вкладки
         
         // Инициализируем данные игры
         this.gameData = null;
         this.fullItemsData = null;
         this.achievementsData = null;
-        this.itemConstants = null;
         
         this.initializeUI();
     }
@@ -50,14 +50,6 @@ class IsaacAchievementParser {
                 this.analysisResults.debugInfo.push('Не удалось загрузить финальные данные достижений');
             }
             
-            // Загружаем константы предметов
-            const constantsResponse = await fetch('data/isaac-item-constants.json');
-            if (constantsResponse.ok) {
-                this.itemConstants = await constantsResponse.json();
-                this.analysisResults.debugInfo.push('Константы предметов загружены');
-            } else {
-                this.analysisResults.debugInfo.push('Не удалось загрузить константы предметов');
-            }
         } catch (error) {
             this.analysisResults.debugInfo.push('Ошибка загрузки данных игры: ' + error.message);
             this.analysisResults.debugInfo.push('Используем базовые данные из isaac-data.js');
@@ -139,6 +131,9 @@ class IsaacAchievementParser {
 
         // Очищаем все вкладки при загрузке нового файла
         this.clearAllTabs();
+        
+        // Сбрасываем сохраненные фильтры
+        this.activeFilters = {};
 
         try {
             this.showFileInfo(file);
@@ -403,18 +398,19 @@ class IsaacAchievementParser {
         return `#${id} Achievement`;
     }
 
-    getBossName(achievementId) {
-        // Проверяем обычных боссов
-        for (const [bossName, ids] of Object.entries(ISAAC_GAME_DATA.bossData.normal)) {
-            if (ids.includes(achievementId)) {
-                return bossName;
-            }
+    getChallengeName(id) {
+        // Проверяем, есть ли название челленджа в наших данных
+        if (ISAAC_GAME_DATA.challenges[id]) {
+            return ISAAC_GAME_DATA.challenges[id].name;
         }
-        
-        // Проверяем порченных боссов
-        for (const [bossName, ids] of Object.entries(ISAAC_GAME_DATA.bossData.tainted)) {
-            if (ids.includes(achievementId)) {
-                return bossName;
+        return `Challenge #${id}`;
+    }
+
+    getBossName(achievementId) {
+        // Ищем босса по ID достижения
+        for (const [bossKey, bossData] of Object.entries(ISAAC_GAME_DATA.bosses)) {
+            if (bossData.achievementIds.includes(achievementId)) {
+                return bossData.name;
             }
         }
         
@@ -422,18 +418,30 @@ class IsaacAchievementParser {
     }
 
     getBossIcon(bossName) {
-        // Для объединенных достижений порченных персонажей не показываем иконки
-        if (bossName === "Сатана + ??? + Айзек + Агнец" || bossName === "Комната вызова + Hush") {
-            return null;
+        // Ищем босса по имени
+        for (const [bossKey, bossData] of Object.entries(ISAAC_GAME_DATA.bosses)) {
+            if (bossData.name === bossName) {
+                if (bossData.iconId === null) {
+                    return null; // Для объединенных достижений порченных персонажей не показываем иконки
+                }
+                return `img/bossMarks/${bossData.iconId}.png`;
+            }
         }
         
-        const iconNumber = ISAAC_GAME_DATA.bossIconMap[bossName] || 1; // По умолчанию иконка Сатаны
-        return `img/bossMarks/${iconNumber}.png`;
+        return `img/bossMarks/1.png`; // По умолчанию иконка Сатаны
+    }
+
+    getCharacterIcon(characterId) {
+        const characterData = ISAAC_GAME_DATA.characters[characterId];
+        if (characterData && characterData.iconId !== undefined) {
+            return `img/characters/${characterData.iconId}.png`;
+        }
+        return `img/characters/0.png`; // По умолчанию иконка Исаака
     }
 
     getCharacterName(characterId) {
-        if (ISAAC_GAME_DATA.characterNames[characterId]) {
-            return ISAAC_GAME_DATA.characterNames[characterId];
+        if (ISAAC_GAME_DATA.characters[characterId]) {
+            return ISAAC_GAME_DATA.characters[characterId].name;
         }
         return `#${characterId} Character`;
     }
@@ -469,26 +477,27 @@ class IsaacAchievementParser {
         this.analysisResults.characters = [];
         let unlockedCharacters = 0;
         
-        for (const characterId of ISAAC_GAME_DATA.characters) {
+        for (const [characterId, characterData] of Object.entries(ISAAC_GAME_DATA.characters)) {
+            const id = parseInt(characterId);
             let isUnlocked = false;
             
             // Исаак (ID 0) доступен с самого начала
-            if (characterId === 0) {
+            if (id === 0) {
                 isUnlocked = true;
             } else {
                 // Остальные персонажи разблокируются через достижения
-                isUnlocked = this.analysisResults.achievements[characterId-1]?.unlocked || false;
+                isUnlocked = this.analysisResults.achievements[characterData.unlockAchievement-1]?.unlocked || false;
             }
             
             if (isUnlocked) unlockedCharacters++;
             
             this.analysisResults.characters.push({
-                id: characterId,
-                name: this.getCharacterName(characterId),
+                id: id,
+                name: characterData.name,
                 unlocked: isUnlocked,
-                unlockCondition: this.getAchievementUnlockCondition(characterId),
-                completionMarks: this.getCharacterCompletionMarks(characterId, isUnlocked),
-                defeatedBosses: this.getCharacterDefeatedBosses(characterId)
+                unlockCondition: this.getAchievementUnlockCondition(characterData.unlockAchievement),
+                completionMarks: this.getCharacterCompletionMarks(id, isUnlocked),
+                defeatedBosses: this.getCharacterDefeatedBosses(id, isUnlocked)
             });
         }
         
@@ -496,14 +505,14 @@ class IsaacAchievementParser {
         this.analysisResults.challenges = [];
         let completedChallenges = 0;
         
-        for (const challengeId of ISAAC_GAME_DATA.challenges) {
+        for (const challengeId of ISAAC_GAME_DATA.challengeIds) {
             const isCompleted = this.analysisResults.achievements[challengeId-1]?.unlocked || false;
             
             if (isCompleted) completedChallenges++;
             
             this.analysisResults.challenges.push({
                 id: challengeId,
-                name: this.getAchievementName(challengeId),
+                name: this.getChallengeName(challengeId),
                 completed: isCompleted,
                 unlockCondition: this.getAchievementUnlockCondition(challengeId)
             });
@@ -622,7 +631,7 @@ class IsaacAchievementParser {
         if (!isUnlocked) return [];
         
         // Получаем данные о боссах для персонажа
-        const bossData = this.getCharacterDefeatedBosses(characterId);
+        const bossData = this.getCharacterDefeatedBosses(characterId, isUnlocked);
         const marks = [];
         
         // Проверяем основные боссы
@@ -637,51 +646,92 @@ class IsaacAchievementParser {
         return marks;
     }
 
-    getCharacterDefeatedBosses(characterId) {
-        // Получаем ID боссов для персонажа
-        const bossIds = ISAAC_GAME_DATA.characterBosses[characterId];
+    getCharacterBossAchievements(characterId, bossKey) {
+        const characterData = ISAAC_GAME_DATA.characters[characterId];
+        if (!characterData) return [];
         
-        if (!bossIds) {
+        const bossData = ISAAC_GAME_DATA.bosses[bossKey];
+        if (!bossData) return [];
+        
+        const isTainted = characterId >= 474;
+        
+        // Для объединенных достижений порченных персонажей возвращаем все достижения
+        if (bossData.isTainted && (bossKey === "Сатана + ??? + Айзек + Агнец" || bossKey === "Комната вызова + Хаш")) {
+            return bossData.achievementIds;
+        }
+        
+        // Для обычных боссов нужно найти достижение конкретно для этого персонажа
+        const characterBossAchievements = characterData.bossAchievements;
+        
+        // Фильтруем достижения босса, оставляя только те, которые есть у персонажа
+        const relevantAchievements = bossData.achievementIds.filter(achievementId => 
+            characterBossAchievements.includes(achievementId)
+        );
+        
+        // Если не найдено ни одного релевантного достижения, возвращаем пустой массив
+        // Это означает, что у этого персонажа нет достижений для данного босса
+        return relevantAchievements;
+    }
+
+    getCharacterDefeatedBosses(characterId, isUnlocked = true) {
+        // Получаем ID боссов для персонажа
+        const characterData = ISAAC_GAME_DATA.characters[characterId];
+        if (!characterData) {
             return [];
         }
         
-        // Проверяем, какие боссы убиты (на основе достижений)
-        const defeatedBosses = [];
-        
-        for (const bossId of bossIds) {
-            const isDefeated = this.analysisResults.achievements[bossId - 1]?.unlocked || false;
-            const bossName = this.getBossName(bossId);
-            
-            // Для порченных персонажей показываем объединенные достижения
-            if (characterId >= 474) {
-                // Порченные персонажи имеют объединенные достижения
-                defeatedBosses.push({
-                    id: bossId,
-                    name: bossName,
-                    defeated: isDefeated,
-                    isTainted: true
-                });
-            } else {
-                // Обычные персонажи имеют отдельные достижения для каждого босса
-                defeatedBosses.push({
-                    id: bossId,
-                    name: bossName,
-                    defeated: isDefeated,
-                    isTainted: false
-                });
-            }
+        // Если персонаж не разблокирован, не показываем убитых боссов
+        if (!isUnlocked) {
+            return [];
         }
         
-        // Для порченных персонажей добавляем "Сердце мамы" если выполнены условия
-        if (characterId >= 474) {
-            const heartDefeated = this.checkTaintedHeartConditions(characterId);
-            if (heartDefeated) {
+        const defeatedBosses = [];
+        const isTainted = characterId >= 474;
+        
+        // Для каждого босса проверяем, убит ли он
+        for (const [bossKey, bossData] of Object.entries(ISAAC_GAME_DATA.bosses)) {
+            // Пропускаем объединенные достижения для обычных персонажей
+            if (!isTainted && bossData.isTainted) continue;
+            // Пропускаем объединенные достижения для порченных персонажей (кроме специальных)
+            if (isTainted && bossData.isTainted && bossKey !== "Сатана + ??? + Айзек + Агнец" && bossKey !== "Комната вызова + Хаш") continue;
+            // Пропускаем "Режим жадности" для порченных персонажей
+            if (isTainted && bossKey === "Режим жадности") continue;
+            
+            // Получаем достижения для этого персонажа и босса
+            const characterAchievements = this.getCharacterBossAchievements(characterId, bossKey);
+            
+            // Если у персонажа нет достижений для этого босса, пропускаем его
+            if (characterAchievements.length === 0) {
+                continue;
+            }
+            
+            // Проверяем, убит ли босс (есть ли хотя бы одно разблокированное достижение для этого персонажа)
+            let isDefeated = false;
+            for (const achievementId of characterAchievements) {
+                if (this.analysisResults.achievements[achievementId - 1]?.unlocked) {
+                    isDefeated = true;
+                    break;
+                }
+            }
+            
+            // Для порченных персонажей добавляем "Сердце мамы" если выполнены условия
+            if (isTainted && bossData.name === "Сердце мамы (сложн. режим)") {
+                const heartDefeated = this.checkTaintedHeartConditions(characterId);
+                if (heartDefeated) {
+                    defeatedBosses.push({
+                        id: bossData.achievementIds[0],
+                        name: bossData.name,
+                        defeated: true,
+                        isTainted: true,
+                        isConditional: true
+                    });
+                }
+            } else {
                 defeatedBosses.push({
-                    id: 169, // ID достижения "Сердце мамы"
-                    name: "Сердце мамы",
-                    defeated: true,
-                    isTainted: true,
-                    isConditional: true
+                    id: bossData.achievementIds[0],
+                    name: bossData.name,
+                    defeated: isDefeated,
+                    isTainted: bossData.isTainted
                 });
             }
         }
@@ -693,15 +743,15 @@ class IsaacAchievementParser {
         // Проверяем условия для засчитывания "Сердце мамы" у порченных персонажей
         const conditions = ISAAC_GAME_DATA.taintedHeartConditions;
         
-        // Проверяем условие 1: Комната вызова + Hush
-        const bossIds = ISAAC_GAME_DATA.characterBosses[characterId];
-        if (!bossIds) return false;
+        // Проверяем условие 1: Комната вызова + Хаш
+        const characterData = ISAAC_GAME_DATA.characters[characterId];
+        if (!characterData) return false;
         
         // Находим индекс персонажа в массиве порченных персонажей (474-490)
         const taintedIndex = characterId - 474;
         
         // Проверяем достижения для этого персонажа
-        const bossCallAchievement = conditions["Комната вызова + Hush"][taintedIndex];
+        const bossCallAchievement = conditions["Комната вызова + Хаш"][taintedIndex];
         const satanAchievement = conditions["Сатана + ??? + Айзек + Агнец"][taintedIndex];
         
         const bossCallDefeated = this.analysisResults.achievements[bossCallAchievement - 1]?.unlocked || false;
@@ -712,44 +762,13 @@ class IsaacAchievementParser {
     }
     
     getCharacterIndex(achievementId) {
-        // Маппинг ID достижений на индексы персонажей
-        const characterMap = {
-            1: 1,   // Магдалена
-            2: 2,   // Каин
-            3: 3,   // Иуда
-            32: 4,  // ???
-            42: 5,  // Ева
-            67: 6,  // Самсон
-            80: 7,  // Лазарь
-            79: 8,  // Азазель
-            81: 9,  // Эдем
-            82: 10, // Лост
-            199: 11, // Лилит
-            251: 12, // Хранитель
-            340: 13, // Аполион
-            390: 14, // Забытый
-            404: 15, // Бетани
-            405: 16, // Иаков и Исав
-            474: 17, // Порченный Айзек
-            475: 18, // Порченная Магдалена
-            476: 19, // Порченный Каин
-            477: 20, // Порченный Иуда
-            478: 21, // Порченный ???
-            479: 22, // Порченный Еву
-            480: 23, // Порченный Самсон
-            481: 24, // Порченный Азазель
-            482: 25, // Порченный Лазарь
-            483: 26, // Порченный Иден
-            484: 27, // Порченный Лост
-            485: 28, // Порченный Лилит
-            486: 29, // Порченный Хранитель
-            487: 30, // Порченный Аполлион
-            488: 31, // Порченный Забытый
-            489: 32, // Порченный Беттани
-            490: 33  // Порченный Иаков и Исав
-        };
-        
-        return characterMap[achievementId];
+        // Ищем персонажа по ID достижения разблокировки
+        for (const [characterId, characterData] of Object.entries(ISAAC_GAME_DATA.characters)) {
+            if (characterData.unlockAchievement === achievementId) {
+                return parseInt(characterId);
+            }
+        }
+        return null;
     }
     
     checkCompletionMark(characterId, markName) {
@@ -765,6 +784,11 @@ class IsaacAchievementParser {
             return false;
         }
         if (id <= 0 || id >= 1000) {
+            return false;
+        }
+        
+        // Исключаем предметы, которые не считаются за "потроганные"
+        if (id === 714 || id === 715) {
             return false;
         }
         
@@ -939,22 +963,43 @@ class IsaacAchievementParser {
         
         // Показываем ВСЕ достижения одним списком
         allAchievements.forEach(achievement => {
-                    const div = document.createElement('div');
-                    div.className = `item-card ${achievement.unlocked ? 'unlocked' : 'locked'}`;
+            const div = document.createElement('div');
+            div.className = `item-card achievement-card ${achievement.unlocked ? 'unlocked' : 'locked'}`;
             
-                    div.innerHTML = `
-                <div style="font-size: 0.9rem; font-weight: bold; color: #e2e8f0; margin-bottom: 12px; line-height: 1.3;">
-                    #${achievement.id} ${achievement.name}
+            // Создаем иконку достижения
+            const achievementIconPath = `img/achievements/${achievement.id}.png`;
+            const achievementIconHtml = `
+                <div class="achievement-icon" style="
+                    background-image: url('${achievementIconPath}');
+                    background-size: contain;
+                    background-repeat: no-repeat;
+                    background-position: center;
+                    width: 60px;
+                    height: 60px;
+                    border-radius: 8px;
+                    flex-shrink: 0;
+                "></div>
+            `;
+            
+            div.innerHTML = `
+                <div class="achievement-main-info">
+                    <div class="achievement-text-info">
+                        <div style="font-size: 0.9rem; font-weight: bold; color: #e2e8f0; margin-bottom: 8px; line-height: 1.3; word-wrap: break-word; overflow-wrap: break-word;">
+                            #${achievement.id} ${achievement.name}
+                        </div>
+                        <div style="color: #a0aec0; font-size: 0.75rem; margin: 4px 0; line-height: 1.4; word-wrap: break-word; overflow-wrap: break-word;">
+                            ${achievement.unlockCondition}
+                        </div>
+                        <div class="status-bottom ${achievement.unlocked ? 'unlocked' : 'locked'}">
+                            ${achievement.unlocked ? '✓ ПОЛУЧЕНО' : '✗ ЗАБЛОКИРОВАНО'}
+                        </div>
+                    </div>
                 </div>
-                <div style="color: #a0aec0; font-size: 0.75rem; margin: 8px 0; line-height: 1.4;">
-                    ${achievement.unlockCondition}
-                </div>
-                <div class="status-bottom ${achievement.unlocked ? 'unlocked' : 'locked'}">
-                    ${achievement.unlocked ? '✓ ПОЛУЧЕНО' : '✗ ЗАБЛОКИРОВАНО'}
-                </div>
-                    `;
+                ${achievementIconHtml}
+            `;
+            
             mainGrid.appendChild(div);
-                });
+        });
         
         container.appendChild(mainGrid);
     }
@@ -1019,15 +1064,35 @@ class IsaacAchievementParser {
                 `;
             }
             
+            // Создаем иконку персонажа
+            const characterIconPath = this.getCharacterIcon(character.id);
+            const characterIconHtml = `
+                <div class="character-icon" style="
+                    background-image: url('${characterIconPath}');
+                    background-size: contain;
+                    background-repeat: no-repeat;
+                    background-position: center;
+                    width: 80px;
+                    height: 80px;
+                    border-radius: 8px;
+                    flex-shrink: 0;
+                "></div>
+            `;
+            
             div.innerHTML = `
-                <div class="item-title" style="font-size: 1rem; font-weight: bold; color: #e2e8f0; margin-bottom: 8px; line-height: 1.3">
-                    ${character.name}
-                </div>
-                <div class="character-status" style="color: ${character.unlocked ? '#ffd700' : '#4c566a'};">
-                    ${character.unlocked ? '✓ РАЗБЛОКИРОВАН' : '✗ ЗАБЛОКИРОВАН'}
-                </div>
-                <div class="character-unlock-condition">
-                    ${character.unlockCondition}
+                <div class="character-main-info" style="display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px;">
+                    <div class="character-text-info" style="flex: 1;">
+                        <div class="item-title" style="font-size: 1rem; font-weight: bold; color: #e2e8f0; margin-bottom: 8px; line-height: 1.3">
+                            ${character.name}
+                        </div>
+                        <div class="character-status" style="color: ${character.unlocked ? '#ffd700' : '#4c566a'};">
+                            ${character.unlocked ? '✓ РАЗБЛОКИРОВАН' : '✗ ЗАБЛОКИРОВАН'}
+                        </div>
+                        <div class="character-unlock-condition">
+                            ${character.unlockCondition}
+                        </div>
+                    </div>
+                    ${characterIconHtml}
                 </div>
                 ${bossesList}
             `;
@@ -1039,20 +1104,61 @@ class IsaacAchievementParser {
         const container = document.getElementById('challengesList');
         container.innerHTML = '';
         
-        this.analysisResults.challenges.forEach(challenge => {
+        // Убираем класс item-grid и добавляем challenges-grid прямо к контейнеру
+        container.className = 'challenges-grid';
+        
+        // Собираем ВСЕ челленджи и сортируем по ID
+        const allChallenges = [...this.analysisResults.challenges].sort((a, b) => a.id - b.id);
+        
+        // Показываем ВСЕ челленджи одним списком
+        allChallenges.forEach(challenge => {
             const div = document.createElement('div');
-            div.className = `item-card ${challenge.completed ? 'unlocked' : 'locked'}`;
-            div.innerHTML = `
-                <div class="item-title" style="font-size: 1rem; font-weight: bold; color: #e2e8f0; margin-bottom: 12px; line-height: 1.3;">
-                    ${challenge.name}
-                </div>
-                <div style="color: #a0aec0; font-size: 0.85rem; margin: 8px 0; line-height: 1.4;">
-                    ${challenge.unlockCondition}
-                </div>
-                <div class="status-bottom ${challenge.completed ? 'unlocked' : 'locked'}">
-                    ${challenge.completed ? '✓ ЗАВЕРШЕН' : '✗ НЕ ЗАВЕРШЕН'}
-                </div>
+            div.className = `item-card challenge-card ${challenge.completed ? 'unlocked' : 'locked'}`;
+            
+            // Получаем данные о челлендже из новой структуры
+            const challengeData = ISAAC_GAME_DATA.challenges[challenge.id];
+            const challengeName = challengeData ? challengeData.name : challenge.name;
+            const unlockCondition = challengeData ? challengeData.unlockCondition : challenge.unlockCondition;
+            
+            // Получаем название достижения из базы достижений по achievementId
+            const achievementId = challengeData ? challengeData.achievementId : challenge.id;
+            const achievementName = this.analysisResults.achievements[achievementId - 1]?.name || challenge.name;
+            
+            // Создаем иконку достижения
+            const achievementIconPath = `img/achievements/${challenge.id}.png`;
+            const challengeIconHtml = `
+                <div class="challenge-icon" style="
+                    background-image: url('${achievementIconPath}');
+                    background-size: contain;
+                    background-repeat: no-repeat;
+                    background-position: center;
+                    width: 60px;
+                    height: 60px;
+                    border-radius: 8px;
+                    flex-shrink: 0;
+                "></div>
             `;
+            
+            div.innerHTML = `
+                <div class="challenge-main-info">
+                    <div class="challenge-text-info">
+                        <div style="font-size: 0.9rem; font-weight: bold; color: #e2e8f0; margin-bottom: 8px; line-height: 1.3; word-wrap: break-word; overflow-wrap: break-word;">
+                            ${challengeName}
+                        </div>
+                        <div class="challenge-unlock-condition" style="word-wrap: break-word; overflow-wrap: break-word;">
+                            Как открыть: ${unlockCondition}
+                        </div>
+                        <div class="challenge-reward" style="word-wrap: break-word; overflow-wrap: break-word;">
+                            Открывает: ${achievementName}
+                        </div>
+                        <div class="status-bottom ${challenge.completed ? 'unlocked' : 'locked'}">
+                            ${challenge.completed ? '✓ ЗАВЕРШЕН' : '✗ НЕ ЗАВЕРШЕН'}
+                        </div>
+                    </div>
+                </div>
+                ${challengeIconHtml}
+            `;
+            
             container.appendChild(div);
         });
     }
@@ -1212,6 +1318,30 @@ class IsaacAchievementParser {
         
         // Инициализируем фильтры для активной вкладки
         this.initializeFilters();
+        
+        // Применяем сохраненный фильтр для этой вкладки
+        const tabId = `${tabName}Tab`;
+        const savedFilter = this.activeFilters[tabId];
+        if (savedFilter && savedFilter !== 'all') {
+            // Определяем тип данных для вкладки
+            let dataType;
+            switch(tabName) {
+                case 'achievements':
+                    dataType = 'achievements';
+                    break;
+                case 'challenges':
+                    dataType = 'challenges';
+                    break;
+                case 'items':
+                    dataType = 'items';
+                    break;
+                default:
+                    return; // Для персонажей фильтров нет
+            }
+            
+            // Применяем сохраненный фильтр
+            this.applyFilter(tabId, dataType, savedFilter);
+        }
     }
 
     clearTabContent(tabName) {
@@ -1273,6 +1403,17 @@ class IsaacAchievementParser {
         if (!tab) return;
 
         const filterButtons = tab.querySelectorAll('.filter-button');
+        
+        // Восстанавливаем активный фильтр для этой вкладки
+        const savedFilter = this.activeFilters[tabId] || 'all';
+        filterButtons.forEach(btn => {
+            if (btn.dataset.filter === savedFilter) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+        
         filterButtons.forEach(button => {
             button.addEventListener('click', () => {
                 // Убираем активный класс со всех кнопок в этой вкладке
@@ -1280,8 +1421,11 @@ class IsaacAchievementParser {
                 // Добавляем активный класс к нажатой кнопке
                 button.classList.add('active');
                 
-                // Применяем фильтр
+                // Сохраняем активный фильтр
                 const filter = button.dataset.filter;
+                this.activeFilters[tabId] = filter;
+                
+                // Применяем фильтр
                 this.applyFilter(tabId, dataType, filter);
             });
         });
@@ -1291,7 +1435,16 @@ class IsaacAchievementParser {
         const tab = document.getElementById(tabId);
         if (!tab) return;
 
-        const container = tab.querySelector('.item-grid, #achievementsList');
+        // Ищем контейнер в зависимости от типа данных
+        let container;
+        if (dataType === 'achievements') {
+            container = tab.querySelector('#achievementsList');
+        } else if (dataType === 'challenges') {
+            container = tab.querySelector('.challenges-grid');
+        } else {
+            container = tab.querySelector('.item-grid');
+        }
+        
         if (!container) return;
 
         const items = container.querySelectorAll('.item-card, .achievement-category');
